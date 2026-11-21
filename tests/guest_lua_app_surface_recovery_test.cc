@@ -12,6 +12,11 @@ namespace window {
 namespace {
 
 constexpr uintptr_t kNativeWindow = 0x1000;
+constexpr uint64_t kStableMs = GuestLuaAppSurfaceRecovery::kStableExtentMs;
+
+uint64_t g_now_ms = 0;
+
+uint64_t Now() { return g_now_ms; }
 
 struct RestartProbe {
   std::vector<runtime::GameSurface> restarts;
@@ -29,58 +34,70 @@ runtime::GameSurface Surface(uint64_t generation, uint32_t width = 948,
   return {generation, kNativeWindow, width, height, 1.0f};
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, ResizeWithinTheEngineGenerationIsIgnored) {
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
+// The engine starts on generation 1 at 948x1034, with the extent last changed
+// at t=0, and the window has been stable since.
+class GuestLuaAppSurfaceRecoveryTest : public testing::Test {
+ protected:
+  void SetUp() override { g_now_ms = 2 * kStableMs; }
+
+  GuestLuaAppSurfaceRecovery MakeRecovery(uint64_t generation = 1) {
+    return GuestLuaAppSurfaceRecovery(&probe_, &Restart, Surface(generation), 0,
+                                      &Now);
+  }
+
+  RestartProbe probe_;
+};
+
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       ResizeWithinTheEngineGenerationIsIgnored) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
 
   const auto result = recovery.Changed(Surface(1, 1904, 1034));
 
   EXPECT_TRUE(result.ok());
   EXPECT_FALSE(result.changed());
-  EXPECT_TRUE(probe.restarts.empty());
+  EXPECT_TRUE(probe_.restarts.empty());
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, RecreatedSurfaceRestartsOnChangedOnly) {
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       RecreatedSurfaceAtAStableExtentRestartsOnChangedOnly) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
 
   EXPECT_TRUE(recovery.Destroyed(1).ok());
   EXPECT_TRUE(recovery.Created(2).ok());
-  EXPECT_TRUE(probe.restarts.empty());
+  EXPECT_TRUE(probe_.restarts.empty());
   EXPECT_TRUE(recovery.restart_pending());
 
   const auto result = recovery.Changed(Surface(2));
 
   EXPECT_TRUE(result.changed());
-  ASSERT_EQ(probe.restarts.size(), 1u);
-  EXPECT_EQ(probe.restarts[0].generation, 2u);
-  EXPECT_EQ(probe.restarts[0].width, 948u);
+  ASSERT_EQ(probe_.restarts.size(), 1u);
+  EXPECT_EQ(probe_.restarts[0].generation, 2u);
+  EXPECT_EQ(probe_.restarts[0].width, 948u);
   EXPECT_EQ(recovery.engine_surface_generation(), 2u);
   EXPECT_FALSE(recovery.restart_pending());
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, NewGenerationWithoutCreatedStillRestarts) {
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       NewGenerationWithoutCreatedStillRestarts) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
 
   EXPECT_TRUE(recovery.Changed(Surface(3)).changed());
-  EXPECT_EQ(probe.restarts.size(), 1u);
+  EXPECT_EQ(probe_.restarts.size(), 1u);
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, StaleDestroyedDoesNotArmARestart) {
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 2);
+TEST_F(GuestLuaAppSurfaceRecoveryTest, StaleDestroyedDoesNotArmARestart) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery(2);
 
   EXPECT_FALSE(recovery.Destroyed(1).changed());
   EXPECT_FALSE(recovery.restart_pending());
   EXPECT_FALSE(recovery.Changed(Surface(2)).changed());
-  EXPECT_TRUE(probe.restarts.empty());
+  EXPECT_TRUE(probe_.restarts.empty());
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, FailedRestartIsNotFatalAndIsRetried) {
-  RestartProbe probe;
-  probe.result = Status::Error(StatusCode::kUnavailable, "engine busy");
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
+TEST_F(GuestLuaAppSurfaceRecoveryTest, FailedRestartIsNotFatalAndIsRetried) {
+  probe_.result = Status::Error(StatusCode::kUnavailable, "engine busy");
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
 
   recovery.Created(2);
   const auto failed = recovery.Changed(Surface(2));
@@ -91,14 +108,14 @@ TEST(GuestLuaAppSurfaceRecoveryTest, FailedRestartIsNotFatalAndIsRetried) {
   EXPECT_TRUE(recovery.restart_pending());
   EXPECT_EQ(recovery.engine_surface_generation(), 1u);
 
-  probe.result = Status::Ok();
+  probe_.result = Status::Ok();
   EXPECT_TRUE(recovery.Changed(Surface(2)).changed());
   EXPECT_EQ(recovery.restarts(), 1u);
   EXPECT_FALSE(recovery.restart_pending());
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest, MissingRestartHookIsNotFatal) {
-  GuestLuaAppSurfaceRecovery recovery(nullptr, nullptr, 1);
+TEST_F(GuestLuaAppSurfaceRecoveryTest, MissingRestartHookIsNotFatal) {
+  GuestLuaAppSurfaceRecovery recovery(nullptr, nullptr, Surface(1), 0, &Now);
 
   recovery.Created(2);
 
@@ -106,50 +123,151 @@ TEST(GuestLuaAppSurfaceRecoveryTest, MissingRestartHookIsNotFatal) {
   EXPECT_EQ(recovery.failed_restarts(), 1u);
 }
 
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       NewGenerationAtADifferentExtentAdoptsWithoutRestarting) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
+
+  recovery.Created(2);
+  const auto result = recovery.Changed(Surface(2, 1471, 828));
+
+  EXPECT_TRUE(result.ok());
+  EXPECT_FALSE(result.changed());
+  EXPECT_TRUE(probe_.restarts.empty());
+  EXPECT_EQ(recovery.engine_surface_generation(), 2u);
+  EXPECT_FALSE(recovery.restart_pending());
+}
+
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       NewGenerationSoonAfterASizeChangeAdoptsWithoutRestarting) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
+
+  EXPECT_FALSE(recovery.Changed(Surface(1, 1471, 828)).changed());
+  g_now_ms += kStableMs - 1;
+  recovery.Created(2);
+  EXPECT_FALSE(recovery.Changed(Surface(2, 1471, 828)).changed());
+
+  EXPECT_TRUE(probe_.restarts.empty());
+  EXPECT_EQ(recovery.engine_surface_generation(), 2u);
+  EXPECT_FALSE(recovery.restart_pending());
+}
+
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       NewGenerationOnceTheExtentHasBeenStableForTheWindowRestarts) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
+
+  EXPECT_FALSE(recovery.Changed(Surface(1, 1471, 828)).changed());
+  g_now_ms += kStableMs;
+  recovery.Created(2);
+  EXPECT_TRUE(recovery.Changed(Surface(2, 1471, 828)).changed());
+
+  ASSERT_EQ(probe_.restarts.size(), 1u);
+  EXPECT_EQ(probe_.restarts[0].width, 1471u);
+  EXPECT_EQ(probe_.restarts[0].height, 828u);
+}
+
+TEST_F(GuestLuaAppSurfaceRecoveryTest,
+       ResizeEndingAfterAnAdoptedRecreationDoesNotRestart) {
+  GuestLuaAppSurfaceRecovery recovery = MakeRecovery();
+
+  recovery.Created(2);
+  recovery.Changed(Surface(2, 1471, 828));
+  g_now_ms += 40;
+
+  // The drag ends at a different size within the adopted generation.
+  EXPECT_FALSE(recovery.Changed(Surface(2, 1335, 752)).changed());
+  EXPECT_TRUE(probe_.restarts.empty());
+}
+
 bool PollLifecycle(void* context, WindowSurfaceEvent* event) {
   return static_cast<WindowSurfaceLifecycle*>(context)->Poll(event);
 }
 
+class GuestLuaAppSurfaceRecoveryBridgeTest
+    : public GuestLuaAppSurfaceRecoveryTest {
+ protected:
+  void SetUp() override {
+    GuestLuaAppSurfaceRecoveryTest::SetUp();
+    ASSERT_TRUE(lifecycle_.Activate(kNativeWindow, 948, 1034, 1.0f).ok());
+  }
+
+  void Resize(uint32_t width, uint32_t height) {
+    g_now_ms += 16;
+    ASSERT_TRUE(lifecycle_.Observe(kNativeWindow, width, height, 1.0f).ok());
+    ASSERT_TRUE(bridge_.Drain().ok());
+  }
+
+  void RecreateSurface() {
+    g_now_ms += 16;
+    ASSERT_TRUE(lifecycle_.Recreate().ok());
+    ASSERT_TRUE(bridge_.Drain().ok());
+  }
+
+  WindowSurfaceLifecycle lifecycle_;
+  GuestLuaAppSurfaceRecovery recovery_ = MakeRecovery();
+  WindowGameSurfaceBridge bridge_{{&lifecycle_, &PollLifecycle},
+                                  recovery_.Consumer()};
+};
+
 // The host reports the swapchain out of date although the extent never
 // changes, and every recovery recreates the surface at the same size. Each
 // recreation must reach the engine exactly once.
-TEST(GuestLuaAppSurfaceRecoveryTest,
-     RepeatedSameSizeRecoveriesEachRestartTheEngineOnce) {
-  WindowSurfaceLifecycle lifecycle;
-  ASSERT_TRUE(lifecycle.Activate(kNativeWindow, 948, 1034, 1.0f).ok());
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
-  WindowGameSurfaceBridge bridge({&lifecycle, &PollLifecycle},
-                                 recovery.Consumer());
-
-  EXPECT_TRUE(bridge.Drain().ok());
-  EXPECT_TRUE(probe.restarts.empty());
+TEST_F(GuestLuaAppSurfaceRecoveryBridgeTest,
+       RepeatedSameSizeRecoveriesEachRestartTheEngineOnce) {
+  EXPECT_TRUE(bridge_.Drain().ok());
+  EXPECT_TRUE(probe_.restarts.empty());
 
   for (uint64_t generation = 2; generation <= 4; ++generation) {
-    ASSERT_TRUE(lifecycle.Recreate().ok());
-    const WindowGameSurfaceDrainResult drained = bridge.Drain();
+    g_now_ms += 16;
+    ASSERT_TRUE(lifecycle_.Recreate().ok());
+    const WindowGameSurfaceDrainResult drained = bridge_.Drain();
     ASSERT_TRUE(drained.ok());
     EXPECT_EQ(drained.drained_events, 3u);  // Destroyed, Created, Changed.
-    ASSERT_EQ(probe.restarts.size(), generation - 1);
-    EXPECT_EQ(probe.restarts.back().generation, generation);
-    EXPECT_EQ(probe.restarts.back().width, 948u);
-    EXPECT_EQ(probe.restarts.back().height, 1034u);
+    ASSERT_EQ(probe_.restarts.size(), generation - 1);
+    EXPECT_EQ(probe_.restarts.back().generation, generation);
+    EXPECT_EQ(probe_.restarts.back().width, 948u);
+    EXPECT_EQ(probe_.restarts.back().height, 1034u);
   }
 }
 
-TEST(GuestLuaAppSurfaceRecoveryTest,
-     PlainResizeThroughTheBridgeDoesNotRestart) {
-  WindowSurfaceLifecycle lifecycle;
-  ASSERT_TRUE(lifecycle.Activate(kNativeWindow, 948, 1034, 1.0f).ok());
-  RestartProbe probe;
-  GuestLuaAppSurfaceRecovery recovery(&probe, &Restart, 1);
-  WindowGameSurfaceBridge bridge({&lifecycle, &PollLifecycle},
-                                 recovery.Consumer());
+TEST_F(GuestLuaAppSurfaceRecoveryBridgeTest,
+       PlainResizeThroughTheBridgeDoesNotRestart) {
+  Resize(1904, 1034);
 
-  ASSERT_TRUE(lifecycle.Observe(kNativeWindow, 1904, 1034, 1.0f).ok());
+  EXPECT_TRUE(probe_.restarts.empty());
+}
 
-  EXPECT_TRUE(bridge.Drain().ok());
-  EXPECT_TRUE(probe.restarts.empty());
+TEST_F(GuestLuaAppSurfaceRecoveryBridgeTest,
+       ObservingTheLiveExtentBeforeRecreatingDoesNotRestart) {
+  ASSERT_TRUE(lifecycle_.Observe(kNativeWindow, 1798, 1034, 1.0f).ok());
+  RecreateSurface();
+
+  EXPECT_TRUE(probe_.restarts.empty());
+  EXPECT_EQ(recovery_.engine_surface_generation(), 2u);
+}
+
+// A drag-resize with the host reporting the swapchain out of date partway
+// through. The restart would lay the UI out at a size the window has already
+// left, so it must not happen; once the window settles, a later recreation at
+// the settled size still restarts.
+TEST_F(GuestLuaAppSurfaceRecoveryBridgeTest,
+       RecreateDuringAResizeSequenceDoesNotRestart) {
+  Resize(1604, 1034);
+  Resize(1485, 1034);
+  Resize(1471, 828);
+  RecreateSurface();
+  Resize(1400, 800);
+  Resize(1335, 752);
+
+  EXPECT_TRUE(probe_.restarts.empty());
+  EXPECT_EQ(recovery_.engine_surface_generation(), 2u);
+
+  g_now_ms += kStableMs;
+  RecreateSurface();
+
+  ASSERT_EQ(probe_.restarts.size(), 1u);
+  EXPECT_EQ(probe_.restarts[0].generation, 3u);
+  EXPECT_EQ(probe_.restarts[0].width, 1335u);
+  EXPECT_EQ(probe_.restarts[0].height, 752u);
 }
 
 }  // namespace

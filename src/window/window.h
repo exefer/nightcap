@@ -136,6 +136,9 @@ void NoteVulkanPresent();
 // PumpEvents coalesces render-thread out-of-date reports into surface rebinds.
 void NoteVulkanSurfaceOutOfDate();
 
+// A new swapchain supersedes earlier out-of-date reports.
+void NoteVulkanSwapchainCreated();
+
 // ClearPresentObserver waits for an in-flight host-present callback.
 bool SetPresentObserver(PresentObserver observer, void* context);
 void ClearPresentObserver();

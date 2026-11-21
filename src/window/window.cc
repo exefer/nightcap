@@ -2006,6 +2006,10 @@ void NoteVulkanSurfaceOutOfDate() {
   g_vulkan_surface_recovery_gate.NotifyOutOfDate();
 }
 
+void NoteVulkanSwapchainCreated() {
+  g_vulkan_surface_recovery_gate.NotifySwapchainCreated();
+}
+
 bool SetPresentObserver(PresentObserver observer, void* context) {
   return g_present_lifecycle.Register(observer, context);
 }
@@ -2067,6 +2071,10 @@ extern "C" void mocktail_window_note_vulkan_call_end(std::uint64_t sequence,
 
 extern "C" void mocktail_window_note_vulkan_surface_out_of_date() {
   NoteVulkanSurfaceOutOfDate();
+}
+
+extern "C" void mocktail_window_note_vulkan_swapchain_created() {
+  NoteVulkanSwapchainCreated();
 }
 
 bool ShouldIgnoreCloseRequest() {
@@ -2301,6 +2309,16 @@ void MaybeRequestFullscreenReadiness() {
   }
 }
 
+Status ObserveHostSurface(void* native_window, int* pixel_width,
+                          int* pixel_height) {
+  SDL_GetWindowSizeInPixels(g_state.sdl_window, pixel_width, pixel_height);
+  return g_window_surface_lifecycle.Observe(
+      reinterpret_cast<uintptr_t>(native_window),
+      *pixel_width > 0 ? static_cast<uint32_t>(*pixel_width) : 0,
+      *pixel_height > 0 ? static_cast<uint32_t>(*pixel_height) : 0,
+      QueryWindowDpiScale());
+}
+
 void MaybeRecoverVulkanSurface() {
   if (!g_state.direct_vulkan || !g_window_surface_lifecycle.active()) {
     return;
@@ -2308,6 +2326,17 @@ void MaybeRecoverVulkanSurface() {
   VulkanSurfaceRecoveryRequest request;
   if (!g_vulkan_surface_recovery_gate.TakeRebindRequest(SDL_GetTicksNS(),
                                                         &request)) {
+    return;
+  }
+  SDL_PumpEvents();
+  int pixel_width = 0;
+  int pixel_height = 0;
+  const Status observe_status = ObserveHostSurface(
+      QueryNativeWindowHandle(), &pixel_width, &pixel_height);
+  if (!observe_status.ok()) {
+    fprintf(stderr, "  [window] surface event rejected: %s\n",
+            observe_status.message().c_str());
+    g_state.quit_requested = true;
     return;
   }
   const Status recreate_status = g_window_surface_lifecycle.Recreate();
@@ -2512,14 +2541,9 @@ bool PumpEvents() {
     if (is_window_event && g_window_surface_lifecycle.active()) {
       int pixel_width = 0;
       int pixel_height = 0;
-      SDL_GetWindowSizeInPixels(g_state.sdl_window, &pixel_width,
-                                &pixel_height);
       void* observed_native_window = QueryNativeWindowHandle();
-      const Status surface_status = g_window_surface_lifecycle.Observe(
-          reinterpret_cast<uintptr_t>(observed_native_window),
-          pixel_width > 0 ? static_cast<uint32_t>(pixel_width) : 0,
-          pixel_height > 0 ? static_cast<uint32_t>(pixel_height) : 0,
-          QueryWindowDpiScale());
+      const Status surface_status = ObserveHostSurface(
+          observed_native_window, &pixel_width, &pixel_height);
       if (!surface_status.ok()) {
         fprintf(stderr, "  [window] surface event rejected: %s\n",
                 surface_status.message().c_str());

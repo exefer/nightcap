@@ -140,6 +140,7 @@ using NoteHostPresentEndFn = void (*)(std::int32_t);
 using NoteVulkanCallBeginFn = std::uint64_t (*)(const char*);
 using NoteVulkanCallEndFn = void (*)(std::uint64_t, std::int32_t);
 using NoteSurfaceOutOfDateFn = void (*)();
+using NoteSwapchainCreatedFn = void (*)();
 using WindowDimensionFn = int (*)();
 
 struct AdapterState {
@@ -202,6 +203,7 @@ struct AdapterState {
   std::atomic<NoteVulkanCallBeginFn> note_vulkan_call_begin{nullptr};
   std::atomic<NoteVulkanCallEndFn> note_vulkan_call_end{nullptr};
   std::atomic<NoteSurfaceOutOfDateFn> note_surface_out_of_date{nullptr};
+  std::atomic<NoteSwapchainCreatedFn> note_swapchain_created{nullptr};
   bool extent_translation_logged = false;
   bool present_policy_logged = false;
   bool initialized = false;
@@ -273,6 +275,10 @@ bool EnsureInitialized() {
   state.note_surface_out_of_date.store(
       ResolveProcessFunction<NoteSurfaceOutOfDateFn>(
           "mocktail_window_note_vulkan_surface_out_of_date"),
+      std::memory_order_release);
+  state.note_swapchain_created.store(
+      ResolveProcessFunction<NoteSwapchainCreatedFn>(
+          "mocktail_window_note_vulkan_swapchain_created"),
       std::memory_order_release);
   if (backend_window == nullptr || uses_direct_vulkan == nullptr ||
       !uses_direct_vulkan() || backend_window() == nullptr) {
@@ -1714,6 +1720,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
     state.note_vulkan_call_end.store(nullptr, std::memory_order_release);
     g_vulkan_call_observation_active.store(false, std::memory_order_release);
     state.note_surface_out_of_date.store(nullptr, std::memory_order_release);
+    state.note_swapchain_created.store(nullptr, std::memory_order_release);
     state.extent_translation_logged = false;
     state.present_policy_logged = false;
     state.initialized = false;
@@ -2272,6 +2279,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
           });
   if (result != VK_SUCCESS) {
     return result;
+  }
+  const NoteSwapchainCreatedFn note_swapchain_created =
+      State().note_swapchain_created.load(std::memory_order_acquire);
+  if (note_swapchain_created != nullptr) {
+    note_swapchain_created();
   }
   const auto host_get_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(
       HostDeviceProc(device, "vkGetSwapchainImagesKHR"));

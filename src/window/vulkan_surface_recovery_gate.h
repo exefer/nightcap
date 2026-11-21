@@ -62,6 +62,15 @@ class VulkanSurfaceRecoveryGate final {
     }
   }
 
+  void NotifySwapchainCreated() {
+    if (!active_.load(std::memory_order_acquire)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    handled_out_of_date_count_ =
+        out_of_date_count_.load(std::memory_order_acquire);
+  }
+
   bool TakeRebindRequest(uint64_t now_ticks_ns,
                          VulkanSurfaceRecoveryRequest* request) {
     if (request == nullptr || !active_.load(std::memory_order_acquire)) {

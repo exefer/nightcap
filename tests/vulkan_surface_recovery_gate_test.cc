@@ -78,6 +78,58 @@ TEST(VulkanSurfaceRecoveryGateTest,
   EXPECT_FALSE(request.retry);
 }
 
+TEST(VulkanSurfaceRecoveryGateTest, SwapchainCreationDiscardsEarlierEvidence) {
+  VulkanSurfaceRecoveryGate gate;
+  ASSERT_TRUE(gate.Activate());
+  gate.NotifyOutOfDate();
+  gate.NotifyOutOfDate();
+
+  gate.NotifySwapchainCreated();
+
+  VulkanSurfaceRecoveryRequest request;
+  EXPECT_FALSE(gate.TakeRebindRequest(100, &request));
+  gate.NotifyOutOfDate();
+  ASSERT_TRUE(gate.TakeRebindRequest(101, &request));
+  EXPECT_EQ(request.observed_error_count, 3u);
+  EXPECT_EQ(request.coalesced_error_count, 1u);
+}
+
+TEST(VulkanSurfaceRecoveryGateTest,
+     SwapchainCreationDoesNotBypassTheRetryInterval) {
+  VulkanSurfaceRecoveryGate gate;
+  ASSERT_TRUE(gate.Activate());
+  gate.NotifyOutOfDate();
+  VulkanSurfaceRecoveryRequest request;
+  constexpr uint64_t kFirstRequestTicks = 1000;
+  ASSERT_TRUE(gate.TakeRebindRequest(kFirstRequestTicks, &request));
+
+  gate.NotifyOutOfDate();
+  gate.NotifySwapchainCreated();
+  gate.NotifyOutOfDate();
+
+  EXPECT_FALSE(gate.TakeRebindRequest(
+      kFirstRequestTicks + VulkanSurfaceRecoveryGate::kRetryIntervalNs - 1,
+      &request));
+  ASSERT_TRUE(gate.TakeRebindRequest(
+      kFirstRequestTicks + VulkanSurfaceRecoveryGate::kRetryIntervalNs,
+      &request));
+  EXPECT_EQ(request.observed_error_count, 3u);
+  EXPECT_EQ(request.coalesced_error_count, 1u);
+}
+
+TEST(VulkanSurfaceRecoveryGateTest,
+     IgnoresSwapchainCreationOutsideActiveLifetime) {
+  VulkanSurfaceRecoveryGate gate;
+  gate.NotifySwapchainCreated();
+
+  ASSERT_TRUE(gate.Activate());
+  gate.NotifyOutOfDate();
+
+  VulkanSurfaceRecoveryRequest request;
+  ASSERT_TRUE(gate.TakeRebindRequest(1, &request));
+  EXPECT_EQ(request.coalesced_error_count, 1u);
+}
+
 TEST(VulkanSurfaceRecoveryGateTest, AcceptsConcurrentRenderThreadEvidence) {
   VulkanSurfaceRecoveryGate gate;
   ASSERT_TRUE(gate.Activate());
