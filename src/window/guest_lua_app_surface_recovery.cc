@@ -1,5 +1,6 @@
 #include "window/guest_lua_app_surface_recovery.h"
 
+#include <chrono>
 #include <utility>
 
 namespace mocktail {
@@ -34,12 +35,26 @@ runtime::GameSessionUpdateResult DispatchDestroyed(void* context,
 
 }  // namespace
 
+uint64_t GuestLuaAppSurfaceRecovery::SteadyClockMs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
 GuestLuaAppSurfaceRecovery::GuestLuaAppSurfaceRecovery(
     void* restart_context, GuestLuaAppRestartFn restart,
-    uint64_t engine_surface_generation)
+    const runtime::GameSurface& engine_surface, uint64_t extent_changed_ms,
+    Clock now_ms)
     : restart_context_(restart_context),
       restart_(restart),
-      engine_generation_(engine_surface_generation) {}
+      now_ms_(now_ms != nullptr ? now_ms : &SteadyClockMs),
+      engine_generation_(engine_surface.generation),
+      extent_width_(engine_surface.width),
+      extent_height_(engine_surface.height),
+      extent_changed_ms_(extent_changed_ms) {}
+
+uint64_t GuestLuaAppSurfaceRecovery::NowMs() const { return now_ms_(); }
 
 runtime::GameSessionUpdateResult GuestLuaAppSurfaceRecovery::Created(
     uint64_t generation) {
@@ -61,12 +76,27 @@ runtime::GameSessionUpdateResult GuestLuaAppSurfaceRecovery::Destroyed(
 
 runtime::GameSessionUpdateResult GuestLuaAppSurfaceRecovery::Changed(
     runtime::GameSurface surface) {
+  const uint64_t now = NowMs();
+  const bool extent_changed =
+      surface.width != extent_width_ || surface.height != extent_height_;
+  if (extent_changed) {
+    extent_width_ = surface.width;
+    extent_height_ = surface.height;
+    extent_changed_ms_ = now;
+  }
   // A new generation is a recreated surface even without a Created event.
   if (surface.generation != engine_generation_) {
     pending_ = true;
   }
   if (!pending_) {
     return Duplicate("guest LuaApp surface resize follows the extent query");
+  }
+  const uint64_t stable_ms = now > extent_changed_ms_ ? now - extent_changed_ms_
+                                                       : 0;
+  if (extent_changed || stable_ms < kStableExtentMs) {
+    engine_generation_ = surface.generation;
+    pending_ = false;
+    return Duplicate("guest LuaApp adopted a surface recreated in a resize");
   }
   if (restart_ == nullptr) {
     ++failed_restarts_;

@@ -21,14 +21,29 @@ using GuestLuaAppRestartFn = Status (*)(void* context,
 // window is resized.
 //
 // A new surface generation restarts the LuaApp once, on the Changed event that
-// carries the final extent. Same-generation Changed events are plain resizes,
-// which the engine follows through the surface capabilities, so they are
-// ignored.
+// carries the final extent, but only when the extent is unchanged and has been
+// stable for kStableExtentMs: the host invalidated the swapchain without a
+// size change. A generation recreated while the window is being resized is
+// adopted without a restart, since the restart would lay the UI out at an
+// extent that is already stale. The engine follows resizes through the surface
+// capabilities, so same-generation Changed events only update the tracked
+// extent.
 class GuestLuaAppSurfaceRecovery final {
  public:
+  using Clock = uint64_t (*)();
+
+  static constexpr uint64_t kStableExtentMs = 500;
+
+  // The default clock for `now_ms` and for the `extent_changed_ms` seed.
+  static uint64_t SteadyClockMs();
+
+  // `engine_surface` and `extent_changed_ms` describe the surface the engine
+  // was started with and when its extent was last observed to change.
   GuestLuaAppSurfaceRecovery(void* restart_context,
                              GuestLuaAppRestartFn restart,
-                             uint64_t engine_surface_generation);
+                             const runtime::GameSurface& engine_surface,
+                             uint64_t extent_changed_ms,
+                             Clock now_ms = nullptr);
 
   GuestLuaAppSurfaceRecovery(const GuestLuaAppSurfaceRecovery&) = delete;
   GuestLuaAppSurfaceRecovery& operator=(const GuestLuaAppSurfaceRecovery&) =
@@ -47,9 +62,15 @@ class GuestLuaAppSurfaceRecovery final {
   uint64_t failed_restarts() const { return failed_restarts_; }
 
  private:
+  uint64_t NowMs() const;
+
   void* restart_context_;
   GuestLuaAppRestartFn restart_;
+  Clock now_ms_;
   uint64_t engine_generation_;
+  uint32_t extent_width_;
+  uint32_t extent_height_;
+  uint64_t extent_changed_ms_;
   bool pending_ = false;
   uint64_t restarts_ = 0;
   uint64_t failed_restarts_ = 0;
